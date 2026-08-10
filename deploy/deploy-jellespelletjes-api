@@ -1,0 +1,9 @@
+#!/bin/sh
+# Installed at /usr/local/bin/deploy-jellespelletjes-api on the VPS, run via a
+# scoped sudoers entry by the CI deploy key:
+#   deploy ALL=(root) NOPASSWD: /usr/local/bin/deploy-jellespelletjes-api
+set -eu
+install -m 755 /tmp/jellespelletjes-api.new /usr/local/bin/jellespelletjes-api
+rm -f /tmp/jellespelletjes-api.new
+systemctl restart jellespelletjes-api
+systemctl --no-pager --lines=0 status jellespelletjes-api

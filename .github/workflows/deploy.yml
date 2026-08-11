@@ -1,4 +1,4 @@
-name: test-and-deploy
+name: test
 
 on:
   push:
@@ -16,32 +16,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
 
-  deploy:
-    needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  nix-build:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
-      - name: Deploy over SSH
-        env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          scp -i ~/.ssh/deploy_key \
-            target/x86_64-unknown-linux-musl/release/jellespelletjes-api \
-            deploy@"$SSH_HOST":/tmp/jellespelletjes-api.new
-          ssh -i ~/.ssh/deploy_key deploy@"$SSH_HOST" \
-            'sudo /usr/local/bin/deploy-jellespelletjes-api'
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix build .#jellespelletjes-api

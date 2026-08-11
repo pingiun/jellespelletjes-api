@@ -66,9 +66,30 @@ horizon. Re-seed before it runs out.
 binary. `MANIFEST.sha256` is checked in CI: updating the lists is a deliberate
 two-file change here after changing them in woordle.
 
-## Deployment
+## Deployment (NixOS)
 
-Hetzner VPS, Debian: static musl binary + systemd (`deploy/…service`), Caddy
-for TLS (`deploy/Caddyfile`), Litestream replicating the SQLite file to R2.
-CI (`.github/workflows/deploy.yml`) tests, builds, and deploys on push to main
-via a scoped deploy script (`deploy/deploy-jellespelletjes-api`).
+The repo is a flake exposing the package and a NixOS module
+(`nixosModules.default`, service `services.jellespelletjes-api`). See
+`deploy/nixos-example.nix` for a complete host snippet: the module (DB in
+`/var/lib/jellespelletjes-api`, hardened systemd unit, CLI in PATH), Caddy as
+TLS-terminating proxy for `api.jellespelletjes.nl`, Litestream replication of
+the SQLite file to R2, and firewall.
+
+Secrets (`RESEND_API_KEY`, Litestream credentials) live in root-owned env
+files referenced via `environmentFile` — swappable for agenix/sops-nix.
+
+Deploying a new version on the server:
+
+```sh
+nix flake update jellespelletjes-api && nixos-rebuild switch
+```
+
+CI runs `cargo test` plus `nix build` on every push; there is no push-based
+deploy — the server pulls.
+
+Seeding on the server:
+
+```sh
+npx tsx scripts/seed-puzzles.ts 2026-08-31 2027-12-31 | ssh vps \
+  'sudo -u jellespelletjes-api env DATABASE_URL=sqlite:///var/lib/jellespelletjes-api/app.db jellespelletjes-api seed-sudoku'
+```

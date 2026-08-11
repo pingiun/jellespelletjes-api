@@ -215,11 +215,60 @@ async fn full_flow() {
     assert_eq!(body["games"]["sudokudo"]["current_streak"], 1);
     assert_eq!(body["games"]["sudokudo"]["imported_baseline"]["gamesPlayed"], 12);
 
-    // logout kills the session.
+    // logout is single sign-off by default: BOTH the game and hub sessions die.
     let (status, _) = call(&state, "POST", "/logout", Some(&game_token), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = call(&state, "GET", "/me", Some(&game_token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(&state, "GET", "/me", Some(&hub_token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_only_this_device() {
+    let state = test_state().await;
+    let raw = make_login_token(&state, "so@example.com").await;
+    let (_, body) = call(
+        &state,
+        "POST",
+        "/auth/magic-link/consume",
+        None,
+        Some(serde_json::json!({ "token": raw })),
+    )
+    .await;
+    let hub_token = body["token"].as_str().unwrap().to_string();
+    let (_, body) = call(
+        &state,
+        "POST",
+        "/auth/sso-code",
+        Some(&hub_token),
+        Some(serde_json::json!({ "origin": "https://sudokudo.nl" })),
+    )
+    .await;
+    let (_, body) = call(
+        &state,
+        "POST",
+        "/auth/sso-code/consume",
+        None,
+        Some(serde_json::json!({ "code": body["code"] })),
+    )
+    .await;
+    let game_token = body["token"].as_str().unwrap().to_string();
+
+    // Scoped logout ends only the game session; the hub session survives.
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/logout",
+        Some(&game_token),
+        Some(serde_json::json!({ "only_this_device": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&state, "GET", "/me", Some(&game_token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(&state, "GET", "/me", Some(&hub_token), None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]

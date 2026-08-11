@@ -288,14 +288,32 @@ pub async fn me(session: Session) -> Json<serde_json::Value> {
     }))
 }
 
+#[derive(Deserialize, Default)]
+pub struct LogoutRequest {
+    /// When true, only this origin's session ends; default is single
+    /// sign-off: every session of the user, on every site and device.
+    #[serde(default)]
+    pub only_this_device: bool,
+}
+
 pub async fn logout(
     State(state): State<SharedState>,
     session: Session,
+    body: Option<Json<LogoutRequest>>,
 ) -> Result<StatusCode, ApiError> {
-    sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
-        .bind(&session.token_hash)
-        .execute(&state.pool)
-        .await
-        .map_err(internal)?;
+    let only_this_device = body.map(|b| b.only_this_device).unwrap_or(false);
+    if only_this_device {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(&session.token_hash)
+            .execute(&state.pool)
+            .await
+            .map_err(internal)?;
+    } else {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(session.user_id)
+            .execute(&state.pool)
+            .await
+            .map_err(internal)?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }

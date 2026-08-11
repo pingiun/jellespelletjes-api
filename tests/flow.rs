@@ -223,6 +223,99 @@ async fn full_flow() {
 }
 
 #[tokio::test]
+async fn cross_device_login_flow() {
+    let state = test_state().await;
+
+    // Device A requests a link with its request id.
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/auth/magic-link",
+        None,
+        Some(serde_json::json!({ "email": "cross@example.com", "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Grab the raw token by replaying insertion: instead, insert our own with a request hash.
+    let (raw, hash) = auth::new_token();
+    let expires = auth::iso(auth::now() + chrono::Duration::minutes(15));
+    sqlx::query(
+        "INSERT INTO login_tokens (token_hash, email, expires_at, request_hash) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&hash)
+    .bind("cross@example.com")
+    .bind(&expires)
+    .bind(auth::hash_token("device-a-nonce"))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    // Device B (no request id) opens the link: gets a code, not a session.
+    let (status, body) = call(
+        &state,
+        "POST",
+        "/auth/magic-link/consume",
+        None,
+        Some(serde_json::json!({ "token": raw })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["cross_device"], true);
+    let code = body["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 6);
+    assert!(body.get("token").is_none());
+
+    // Wrong code fails and counts an attempt.
+    let wrong = if code == "000000" { "000001" } else { "000000" };
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/auth/code/consume",
+        None,
+        Some(serde_json::json!({ "code": wrong, "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Wrong request id (a third device) cannot redeem the right code.
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/auth/code/consume",
+        None,
+        Some(serde_json::json!({ "code": code, "request_id": "device-c-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Device A redeems the code and gets a session.
+    let (status, body) = call(
+        &state,
+        "POST",
+        "/auth/code/consume",
+        None,
+        Some(serde_json::json!({ "code": code, "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["email"], "cross@example.com");
+    let token = body["token"].as_str().unwrap().to_string();
+    let (status, _) = call(&state, "GET", "/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The code is single-use.
+    let (status, _) = call(
+        &state,
+        "POST",
+        "/auth/code/consume",
+        None,
+        Some(serde_json::json!({ "code": code, "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn woordle_submission_flow() {
     use jellespelletjes_api::games::woordle;
     let state = test_state().await;

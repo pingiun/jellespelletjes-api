@@ -299,6 +299,18 @@ async fn cross_device_login_flow() {
     .await
     .unwrap();
 
+    // Before the link is opened elsewhere, the waiting device sees no code.
+    let (status, body) = call(
+        &state,
+        "POST",
+        "/auth/code/status",
+        None,
+        Some(serde_json::json!({ "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["code_issued"], false);
+
     // Device B (no request id) opens the link: gets a code, not a session.
     let (status, body) = call(
         &state,
@@ -313,6 +325,17 @@ async fn cross_device_login_flow() {
     let code = body["code"].as_str().unwrap().to_string();
     assert_eq!(code.len(), 6);
     assert!(body.get("token").is_none());
+
+    // Now the waiting device's poll reports the issued code.
+    let (_, body) = call(
+        &state,
+        "POST",
+        "/auth/code/status",
+        None,
+        Some(serde_json::json!({ "request_id": "device-a-nonce" })),
+    )
+    .await;
+    assert_eq!(body["code_issued"], true);
 
     // Wrong code fails and counts an attempt.
     let wrong = if code == "000000" { "000001" } else { "000000" };

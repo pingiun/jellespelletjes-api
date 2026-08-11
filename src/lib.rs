@@ -40,6 +40,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/magic-link", post(routes::auth::request_magic_link))
         .route("/auth/magic-link/consume", post(routes::auth::consume_magic_link))
         .route("/auth/code/consume", post(routes::auth::consume_code))
+        .route("/auth/code/status", post(routes::auth::code_status))
         .route("/auth/sso-code", post(routes::auth::create_sso_code))
         .route("/auth/sso-code/consume", post(routes::auth::consume_sso_code))
         .route("/me", get(routes::auth::me).delete(routes::profile::delete_me))

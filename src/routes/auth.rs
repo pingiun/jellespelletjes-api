@@ -156,6 +156,33 @@ pub async fn consume_magic_link(
 }
 
 #[derive(Deserialize)]
+pub struct CodeStatusRequest {
+    pub request_id: String,
+}
+
+/// Lets the waiting device discover that its login link was opened elsewhere
+/// (a transfer code was issued). Keyed on the secret request id, so only the
+/// requesting browser can ask.
+pub async fn code_status(
+    State(state): State<SharedState>,
+    Json(body): Json<CodeStatusRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let now = auth::iso(auth::now());
+    let issued: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM login_tokens
+         WHERE request_hash = ? AND code_hash IS NOT NULL
+           AND used_at IS NULL AND expires_at > ?
+         LIMIT 1",
+    )
+    .bind(auth::hash_token(&body.request_id))
+    .bind(&now)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(json!({ "code_issued": issued.is_some() })))
+}
+
+#[derive(Deserialize)]
 pub struct ConsumeCodeRequest {
     pub code: String,
     pub request_id: String,

@@ -30,12 +30,18 @@ pub async fn profile(
             .await
             .map_err(internal)?;
 
-    let today_sudoku: Option<i64> = sqlx::query_scalar(
-        "SELECT puzzle_number FROM sudoku_puzzles WHERE date <= date('now') ORDER BY date DESC LIMIT 1",
-    )
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
+    let mut today_sudoku = std::collections::HashMap::new();
+    for mode in ["normal", "expert"] {
+        let n: Option<i64> = sqlx::query_scalar(
+            "SELECT puzzle_number FROM sudoku_puzzles
+             WHERE mode = ? AND date <= date('now') ORDER BY date DESC LIMIT 1",
+        )
+        .bind(mode)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?;
+        today_sudoku.insert(mode, n);
+    }
 
     let mut per_game = serde_json::Map::new();
     for game in games::GAMES {
@@ -48,7 +54,8 @@ pub async fn profile(
             })
             .collect();
         let today_day = match *game {
-            "sudokudo" => today_sudoku,
+            "sudokudo" => today_sudoku.get("normal").copied().flatten(),
+            "sudokudo-expert" => today_sudoku.get("expert").copied().flatten(),
             g => woordle::variant(g).map(woordle::utc_day),
         };
         let mut entry = stats::game_stats(game, &game_rows, today_day);

@@ -72,8 +72,8 @@ async fn make_login_token(state: &SharedState, email: &str) -> String {
 
 async fn seed_puzzle(state: &SharedState, number: i64, date: &str, solution: &str) {
     sqlx::query(
-        "INSERT INTO sudoku_puzzles (puzzle_number, date, generator_version, difficulty, givens, solution)
-         VALUES (?, ?, 'v2', 'easy', ?, ?)",
+        "INSERT INTO sudoku_puzzles (mode, puzzle_number, date, generator_version, difficulty, givens, solution)
+         VALUES ('normal', ?, ?, 'v2', 'beginner', ?, ?)",
     )
     .bind(number)
     .bind(date)

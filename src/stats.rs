@@ -14,9 +14,10 @@ pub fn game_stats(game: &str, rows: &[ResultRow], today_day: Option<i64>) -> ser
     let mut days: Vec<(i64, bool)> = rows
         .iter()
         .map(|r| {
-            let won = match game {
-                "sudokudo" => true, // only verified wins are stored for sudoku
-                _ => r.payload.get("won").and_then(|v| v.as_bool()).unwrap_or(false),
+            let won = if game.starts_with("sudokudo") {
+                true // only verified wins are stored for sudoku
+            } else {
+                r.payload.get("won").and_then(|v| v.as_bool()).unwrap_or(false)
             };
             (r.day, won)
         })
@@ -62,7 +63,7 @@ pub fn game_stats(game: &str, rows: &[ResultRow], today_day: Option<i64>) -> ser
     }
 
     // Distribution: sudokudo buckets solve times (minutes), woordle buckets guess counts.
-    let distribution = if game == "sudokudo" {
+    let distribution = if game.starts_with("sudokudo") {
         let bounds_min = [3.0, 5.0, 10.0, 15.0, 30.0];
         let mut buckets = [0i64; 6];
         for r in rows {

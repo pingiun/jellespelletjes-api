@@ -20,12 +20,23 @@ fn internal<E: std::fmt::Display>(e: E) -> ApiError {
 
 /// Today's sudoku puzzle number, derived from the seeded rows (the server has
 /// no knowledge of the epoch — the seed data is the source of truth).
-async fn today_sudoku_number(pool: &sqlx::SqlitePool) -> anyhow::Result<Option<i64>> {
+async fn today_sudoku_number(pool: &sqlx::SqlitePool, mode: &str) -> anyhow::Result<Option<i64>> {
     Ok(sqlx::query_scalar(
-        "SELECT puzzle_number FROM sudoku_puzzles WHERE date <= date('now') ORDER BY date DESC LIMIT 1",
+        "SELECT puzzle_number FROM sudoku_puzzles
+         WHERE mode = ? AND date <= date('now') ORDER BY date DESC LIMIT 1",
     )
+    .bind(mode)
     .fetch_optional(pool)
     .await?)
+}
+
+/// Map an API game id to a puzzle-table mode ("sudokudo" is the normal game).
+fn sudoku_mode(game: &str) -> Option<&'static str> {
+    match game {
+        "sudokudo" => Some("normal"),
+        "sudokudo-expert" => Some("expert"),
+        _ => None,
+    }
 }
 
 pub async fn put_result(
@@ -38,32 +49,32 @@ pub async fn put_result(
         return Err(err(StatusCode::NOT_FOUND, "unknown game"));
     }
 
-    let payload = match game.as_str() {
-        "sudokudo" => {
+    let payload = match sudoku_mode(&game) {
+        Some(mode) => {
             let submission: sudokudo::SudokuSubmission =
                 serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
-            let seeded: Option<(i64, String, String, String)> = sqlx::query_as(
-                "SELECT puzzle_number, generator_version, difficulty, solution
-                 FROM sudoku_puzzles WHERE puzzle_number = ?",
+            let seeded: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT generator_version, difficulty, solution
+                 FROM sudoku_puzzles WHERE mode = ? AND puzzle_number = ?",
             )
+            .bind(mode)
             .bind(day)
             .fetch_optional(&state.pool)
             .await
             .map_err(internal)?;
-            let seeded = seeded.map(|(_n, v, d, s)| sudokudo::SeededPuzzle {
-
+            let seeded = seeded.map(|(v, d, s)| sudokudo::SeededPuzzle {
                 generator_version: v,
                 difficulty: d,
                 solution: s,
             });
-            let today = today_sudoku_number(&state.pool)
+            let today = today_sudoku_number(&state.pool, mode)
                 .await
                 .map_err(internal)?
                 .unwrap_or(i64::MIN);
             sudokudo::verify(seeded.as_ref(), today, day, &submission)
                 .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.message()))?
         }
-        _ => {
+        None => {
             let submission: woordle::WoordleSubmission =
                 serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
             woordle::verify(&game, day, &submission)

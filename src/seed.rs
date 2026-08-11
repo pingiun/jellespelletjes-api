@@ -6,8 +6,14 @@
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+fn default_mode() -> String {
+    "expert".to_string()
+}
+
 #[derive(Deserialize)]
 struct SeedRow {
+    #[serde(default = "default_mode")]
+    mode: String,
     puzzle_number: i64,
     date: String,
     generator_version: String,
@@ -31,8 +37,9 @@ pub async fn seed_sudoku_from_stdin(pool: &sqlx::SqlitePool) -> anyhow::Result<(
 
         let existing: Option<(String, String, String, String, String)> = sqlx::query_as(
             "SELECT date, generator_version, difficulty, givens, solution
-             FROM sudoku_puzzles WHERE puzzle_number = ?",
+             FROM sudoku_puzzles WHERE mode = ? AND puzzle_number = ?",
         )
+        .bind(&row.mode)
         .bind(row.puzzle_number)
         .fetch_optional(pool)
         .await?;
@@ -54,9 +61,10 @@ pub async fn seed_sudoku_from_stdin(pool: &sqlx::SqlitePool) -> anyhow::Result<(
             None => {
                 sqlx::query(
                     "INSERT INTO sudoku_puzzles
-                     (puzzle_number, date, generator_version, difficulty, givens, solution)
-                     VALUES (?, ?, ?, ?, ?, ?)",
+                     (mode, puzzle_number, date, generator_version, difficulty, givens, solution)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
                 )
+                .bind(&row.mode)
                 .bind(row.puzzle_number)
                 .bind(&row.date)
                 .bind(&row.generator_version)

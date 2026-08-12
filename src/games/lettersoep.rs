@@ -42,8 +42,8 @@ impl Lang {
     /// change is an explicit new era rather than silently remapping dates.
     pub fn version(self) -> &'static str {
         match self {
-            Lang::Nl => "v4", // v4: frequency-filtered pool, view targets the best move
-            Lang::En => "v1",
+            Lang::Nl => "v5", // v5: the view frames a random word, not the best move
+            Lang::En => "v2", // v2: same random-word view as NL v5
         }
     }
 
@@ -730,7 +730,7 @@ pub fn daily_puzzle(date: NaiveDate, lang: Lang) -> anyhow::Result<DailyPuzzle> 
             number: puzzle_number(date),
             seed,
             generator_version: lang.version(),
-            view: pick_view(&mut rng, &board, &moves[0]),
+            view: pick_view(&mut rng, &placed),
             placed,
             rack: rack.iter().map(|&l| l as char).collect(),
             max_score,
@@ -907,43 +907,16 @@ fn draw_rack(rng: &mut Rng, used: &[u8], bag_counts: &[(u8, u8); 26]) -> Vec<u8>
     bag[..RACK_SIZE].to_vec()
 }
 
-/// A tight window placed so the best-scoring move — including the fixed
-/// letters its main word runs through — is fully visible, jittered within
-/// the slack so the target's position gives nothing away. Other board words
-/// may fall (partly) into the fog: you walked in mid-game.
-fn pick_view(rng: &mut Rng, board: &Board, best: &Move) -> ViewRect {
-    let grid = Grid::from_board(board);
-    let mut min_row = BOARD_SIZE;
-    let mut max_row = 0;
-    let mut min_col = BOARD_SIZE;
-    let mut max_col = 0;
-    for t in &best.tiles {
-        min_row = min_row.min(t.row);
-        max_row = max_row.max(t.row);
-        min_col = min_col.min(t.col);
-        max_col = max_col.max(t.col);
-    }
-    // Extend along the main word's line over fixed letters at both ends.
-    let across = best.tiles.iter().all(|t| t.row == best.tiles[0].row)
-        && (best.tiles.len() > 1 || {
-            let t = &best.tiles[0];
-            grid.has(t.row, t.col - 1) || grid.has(t.row, t.col + 1)
-        });
-    if across {
-        while grid.has(min_row, min_col - 1) {
-            min_col -= 1;
-        }
-        while grid.has(max_row, max_col + 1) {
-            max_col += 1;
-        }
-    } else {
-        while grid.has(min_row - 1, min_col) {
-            min_row -= 1;
-        }
-        while grid.has(max_row + 1, max_col) {
-            max_row += 1;
-        }
-    }
+/// A tight window framing a randomly chosen board word, jittered within the
+/// slack. Deliberately NOT the best move's location: the opening view shows
+/// some of the action but reveals nothing about where to play.
+fn pick_view(rng: &mut Rng, placed: &[PlacedWord]) -> ViewRect {
+    let word = &placed[rng.next_below(placed.len() as u32) as usize];
+    let len = word.word.len() as i32;
+    let (min_row, max_row, min_col, max_col) = match word.dir {
+        "down" => (word.row, word.row + len - 1, word.col, word.col),
+        _ => (word.row, word.row, word.col, word.col + len - 1),
+    };
     let rows = VIEW_ROWS.max(max_row - min_row + 1);
     let cols = VIEW_COLS.max(max_col - min_col + 1);
     let top_slack = rows - (max_row - min_row + 1);
@@ -1075,7 +1048,7 @@ mod tests {
     fn day_one_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let puzzle = daily_puzzle(date, Lang::Nl).unwrap();
-        assert_eq!(puzzle.seed, 900493200);
+        assert_eq!(puzzle.seed, 103931349);
         assert_eq!(puzzle.number, 1);
         let words: Vec<(&str, i32, i32, &str)> = puzzle
             .placed
@@ -1085,23 +1058,24 @@ mod tests {
         assert_eq!(
             words,
             vec![
-                ("NIETSNUT", 3, 7, "down"),
-                ("BRANDING", 3, 1, "across"),
-                ("GEMAKJE", 0, 3, "down"),
-                ("TWISTER", 10, 3, "across"),
-                ("AFGUNST", 0, 1, "across"),
-                ("REGELDEN", 8, 0, "across"),
+                ("WACHTEND", 2, 7, "down"),
+                ("HAMEREN", 3, 6, "across"),
+                ("LICHTEN", 10, 2, "across"),
+                ("PRIMA", 8, 3, "down"),
+                ("VREDES", 2, 10, "down"),
+                ("ERELIJST", 4, 1, "down"),
+                ("KWALLEN", 0, 2, "down"),
             ]
         );
-        assert_eq!(puzzle.rack, vec!['A', 'N', 'A', 'S', 'E', 'F', 'M']);
+        assert_eq!(puzzle.rack, vec!['B', 'E', 'F', 'N', 'A', 'E', 'N']);
         assert_eq!(
             (puzzle.view.top, puzzle.view.left, puzzle.view.rows, puzzle.view.cols),
-            (3, 3, 9, 8)
+            (0, 0, 9, 8)
         );
-        assert_eq!(puzzle.max_score, 136);
-        assert_eq!(puzzle.move_count, 931);
-        assert_eq!(puzzle.valid_words.len(), 459);
-        assert_eq!(&puzzle.valid_words[..3], ["AAD", "AAM", "AAN"]);
+        assert_eq!(puzzle.max_score, 87);
+        assert_eq!(puzzle.move_count, 644);
+        assert_eq!(puzzle.valid_words.len(), 315);
+        assert_eq!(&puzzle.valid_words[..3], ["AAN", "AANBEEN", "AANBENE"]);
     }
 
     /// Manual benchmark: cargo test --release -- --ignored --nocapture bench
@@ -1124,8 +1098,8 @@ mod tests {
     fn english_day_one_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let puzzle = daily_puzzle(date, Lang::En).unwrap();
-        assert_eq!(puzzle.seed, 1211504969);
-        assert_eq!(puzzle.generator_version, "v1");
+        assert_eq!(puzzle.seed, 746757450);
+        assert_eq!(puzzle.generator_version, "v2");
         let words: Vec<(&str, i32, i32, &str)> = puzzle
             .placed
             .iter()
@@ -1134,27 +1108,29 @@ mod tests {
         assert_eq!(
             words,
             vec![
-                ("MISPRINT", 5, 7, "down"),
-                ("REVELLER", 9, 7, "across"),
-                ("DIPOLAR", 5, 12, "down"),
-                ("GROWLER", 8, 14, "down"),
-                ("ASCENTS", 13, 1, "across"),
+                ("STALKER", 3, 7, "down"),
+                ("METRO", 4, 5, "across"),
+                ("KNOCKOUT", 7, 7, "across"),
+                ("REISSUES", 10, 0, "across"),
+                ("CRACKER", 5, 1, "down"),
+                ("ABACK", 3, 11, "down"),
+                ("WEARY", 3, 9, "across"),
             ]
         );
-        assert_eq!(puzzle.rack, vec!['O', 'T', 'E', 'D', 'U', 'R', 'O']);
+        assert_eq!(puzzle.rack, vec!['I', 'I', 'N', 'G', 'G', 'H', 'T']);
         assert_eq!(
             (puzzle.view.top, puzzle.view.left, puzzle.view.rows, puzzle.view.cols),
-            (0, 0, 9, 8)
+            (0, 7, 9, 8)
         );
-        assert_eq!(puzzle.max_score, 83);
-        assert_eq!(puzzle.move_count, 1216);
-        assert_eq!(puzzle.valid_words.len(), 548);
-        assert_eq!(&puzzle.valid_words[..3], ["AD", "ADO", "AE"]);
+        assert_eq!(puzzle.max_score, 69);
+        assert_eq!(puzzle.move_count, 355);
+        assert_eq!(puzzle.valid_words.len(), 213);
+        assert_eq!(&puzzle.valid_words[..3], ["AG", "AGIN", "AGING"]);
     }
 
     #[test]
     fn seed_derivation_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
-        assert_eq!(seed_for_date(date, Lang::Nl), 950826057);
+        assert_eq!(seed_for_date(date, Lang::Nl), 53598492);
     }
 }

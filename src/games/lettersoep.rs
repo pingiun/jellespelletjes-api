@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
-pub const GENERATOR_VERSION: &str = "v1";
+pub const GENERATOR_VERSION: &str = "v4"; // v4: frequency-filtered pool, view targets the best move
 
 /// Launch day: puzzle #1 appears on this UTC date (placeholder for now).
 pub fn epoch() -> NaiveDate {
@@ -142,6 +142,37 @@ fn premium_at(row: i32, col: i32) -> Option<Premium> {
 
 type Board = HashMap<(i32, i32), u8>;
 
+/// Flat 15x15 array of the fixed tiles (0 = empty): the hot search path
+/// probes millions of cells, and an indexed load beats hashing by an order
+/// of magnitude.
+struct Grid {
+    cells: [u8; 225],
+}
+
+impl Grid {
+    fn from_board(board: &Board) -> Self {
+        let mut cells = [0u8; 225];
+        for (&(row, col), &letter) in board {
+            cells[(row * BOARD_SIZE + col) as usize] = letter;
+        }
+        Self { cells }
+    }
+
+    #[inline]
+    fn at(&self, row: i32, col: i32) -> u8 {
+        if (0..BOARD_SIZE).contains(&row) && (0..BOARD_SIZE).contains(&col) {
+            self.cells[(row * BOARD_SIZE + col) as usize]
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn has(&self, row: i32, col: i32) -> bool {
+        self.at(row, col) != 0
+    }
+}
+
 #[derive(Clone, Copy, Serialize)]
 pub struct Tile {
     pub row: i32,
@@ -174,13 +205,22 @@ pub struct Scored {
 /// the fixed board and score it (premiums only under new tiles, cross-words
 /// count, 7 tiles = bingo).
 pub fn score_placement(fixed: &Board, placed: &[Tile]) -> Option<Scored> {
+    score_placement_grid(&Grid::from_board(fixed), placed)
+}
+
+fn score_placement_grid(fixed: &Grid, placed: &[Tile]) -> Option<Scored> {
     if placed.is_empty() {
         return None;
     }
-    let placed_map: HashMap<(i32, i32), u8> =
-        placed.iter().map(|t| ((t.row, t.col), t.letter)).collect();
+    // At most 7 placed tiles: linear scans beat any map.
+    let placed_at = |row: i32, col: i32| -> Option<u8> {
+        placed.iter().find(|t| t.row == row && t.col == col).map(|t| t.letter)
+    };
     let letter_at = |row: i32, col: i32| -> Option<u8> {
-        placed_map.get(&(row, col)).or_else(|| fixed.get(&(row, col))).copied()
+        placed_at(row, col).or_else(|| {
+            let l = fixed.at(row, col);
+            (l != 0).then_some(l)
+        })
     };
 
     let across = placed.iter().all(|t| t.row == placed[0].row);
@@ -202,14 +242,14 @@ pub fn score_placement(fixed: &Board, placed: &[Tile]) -> Option<Scored> {
     }
 
     // No overlap with fixed tiles; must touch at least one.
-    if placed.iter().any(|t| fixed.contains_key(&(t.row, t.col))) {
+    if placed.iter().any(|t| fixed.has(t.row, t.col)) {
         return None;
     }
     let touches = placed.iter().any(|t| {
-        fixed.contains_key(&(t.row, t.col - 1))
-            || fixed.contains_key(&(t.row, t.col + 1))
-            || fixed.contains_key(&(t.row - 1, t.col))
-            || fixed.contains_key(&(t.row + 1, t.col))
+        fixed.has(t.row, t.col - 1)
+            || fixed.has(t.row, t.col + 1)
+            || fixed.has(t.row - 1, t.col)
+            || fixed.has(t.row + 1, t.col)
     });
     if !touches {
         return None;
@@ -227,7 +267,7 @@ pub fn score_placement(fixed: &Board, placed: &[Tile]) -> Option<Scored> {
         while let Some(letter) = letter_at(row, col) {
             word.push(letter as char);
             let premium =
-                if placed_map.contains_key(&(row, col)) { premium_at(row, col) } else { None };
+                if placed_at(row, col).is_some() { premium_at(row, col) } else { None };
             let mut value = letter_value(letter);
             match premium {
                 Some(Premium::Dl) => value *= 2,
@@ -283,51 +323,129 @@ fn count_letters(letters: impl Iterator<Item = u8>) -> [u16; 26] {
     counts
 }
 
+/// Per-word signature, precomputed once so each generation attempt can
+/// prune the 1.1M-word list with a mask test instead of recounting. Counts
+/// are padded to 32 bytes so the availability test runs as four u64 SWAR
+/// comparisons instead of a 26-iteration loop.
+pub struct WordEntry {
+    pub word: &'static str,
+    len: u8,
+    /// Bit i set = letter (b'A' + i) occurs in the word.
+    mask: u32,
+    counts: [u8; 32],
+}
+
+pub fn index_words(words: impl Iterator<Item = &'static str>) -> Vec<WordEntry> {
+    words
+        .map(|word| {
+            let mut counts = [0u8; 32];
+            let mut mask = 0u32;
+            for letter in word.bytes() {
+                let i = (letter - b'A') as usize;
+                counts[i] += 1;
+                mask |= 1 << i;
+            }
+            WordEntry { word, len: word.len() as u8, mask, counts }
+        })
+        .collect()
+}
+
+/// Per-byte `needed[i] <= avail[i]` over all 32 bytes, as four u64 SWAR
+/// steps. Valid because both sides stay below 128 (max letter count is 25).
+#[inline]
+fn counts_fit(needed: &[u8; 32], avail: &[u8; 32]) -> bool {
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    for k in 0..4 {
+        let a = u64::from_le_bytes(avail[k * 8..k * 8 + 8].try_into().unwrap());
+        let n = u64::from_le_bytes(needed[k * 8..k * 8 + 8].try_into().unwrap());
+        // With high bits forced on, a byte only loses its high bit when the
+        // subtraction borrows, i.e. when needed > avail.
+        if ((a | HIGH).wrapping_sub(n)) & HIGH != HIGH {
+            return false;
+        }
+    }
+    true
+}
+
 /// Port of moves.ts findAllMoves: every dictionary word, in each
 /// orientation, at each position where it fits the fixed tiles and rack.
-pub fn find_all_moves(fixed: &Board, rack: &[u8], dict: &HashSet<&str>) -> Vec<Move> {
+/// Two indexes keep it fast: precomputed word signatures (mask + counts)
+/// prune candidates, and per-line anchor ranges limit placements to lines
+/// that can actually touch the board.
+pub fn find_all_moves(
+    fixed: &Board,
+    rack: &[u8],
+    index: &[WordEntry],
+    dict: &HashSet<&str>,
+) -> Vec<Move> {
+    let grid = Grid::from_board(fixed);
     let rack_counts = count_letters(rack.iter().copied());
     let board_counts = count_letters(fixed.values().copied());
+    let mut avail = [0u8; 32];
+    let mut avail_mask = 0u32;
+    for i in 0..26 {
+        avail[i] = (rack_counts[i] + board_counts[i]) as u8;
+        if avail[i] > 0 {
+            avail_mask |= 1 << i;
+        }
+    }
 
     let max_len = (BOARD_SIZE as usize).min(rack.len() + fixed.len());
-    let candidates: Vec<&str> = dict
+    let candidates: Vec<&WordEntry> = index
         .iter()
-        .filter(|word| {
-            let len = word.len();
-            if !(2..=max_len).contains(&len) {
-                return false;
-            }
-            let counts = count_letters(word.bytes());
-            counts
-                .iter()
-                .enumerate()
-                .all(|(i, &n)| n <= rack_counts[i] + board_counts[i])
+        .filter(|e| {
+            (2..=max_len).contains(&(e.len as usize))
+                && e.mask & !avail_mask == 0
+                && counts_fit(&e.counts, &avail)
         })
-        .copied()
         .collect();
 
-    let mut near_fixed: HashSet<(i32, i32)> = HashSet::new();
+    let mut near_fixed = [false; 225];
     for &(row, col) in fixed.keys() {
         for (dr, dc) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
-            near_fixed.insert((row + dr, col + dc));
+            let (r, c) = (row + dr, col + dc);
+            if (0..BOARD_SIZE).contains(&r) && (0..BOARD_SIZE).contains(&c) {
+                near_fixed[(r * BOARD_SIZE + c) as usize] = true;
+            }
+        }
+    }
+    // Anchor ranges: a placement must cover a near-fixed cell, so an across
+    // word only fits on rows that have one, at columns overlapping them
+    // (and likewise for down words).
+    let mut row_span: HashMap<i32, (i32, i32)> = HashMap::new();
+    let mut col_span: HashMap<i32, (i32, i32)> = HashMap::new();
+    for row in 0..BOARD_SIZE {
+        for col in 0..BOARD_SIZE {
+            if !near_fixed[(row * BOARD_SIZE + col) as usize] {
+                continue;
+            }
+            let r = row_span.entry(row).or_insert((col, col));
+            r.0 = r.0.min(col);
+            r.1 = r.1.max(col);
+            let c = col_span.entry(col).or_insert((row, row));
+            c.0 = c.0.min(row);
+            c.1 = c.1.max(row);
         }
     }
 
     let mut moves: HashMap<String, Move> = HashMap::new();
-    for word in &candidates {
+    for entry in &candidates {
+        let word = entry.word;
+        let len = entry.len as i32;
         for across in [true, false] {
             let (d_row, d_col) = if across { (0, 1) } else { (1, 0) };
-            let len = word.len() as i32;
-            let row_max = if across { BOARD_SIZE } else { BOARD_SIZE - len + 1 };
-            let col_max = if across { BOARD_SIZE - len + 1 } else { BOARD_SIZE };
-            for row in 0..row_max {
-                for col in 0..col_max {
+            let span = if across { &row_span } else { &col_span };
+            for (&line, &(lo, hi)) in span {
+                let from = (lo - len + 1).max(0);
+                let to = hi.min(BOARD_SIZE - len);
+                for pos in from..=to {
+                    let (row, col) = if across { (line, pos) } else { (pos, line) };
                     let Some(tiles) =
-                        fit_word(fixed, &rack_counts, &near_fixed, word, row, col, d_row, d_col)
+                        fit_word(&grid, &rack_counts, &near_fixed, word, row, col, d_row, d_col)
                     else {
                         continue;
                     };
-                    let Some(scored) = score_placement(fixed, &tiles) else { continue };
+                    let Some(scored) = score_placement_grid(&grid, &tiles) else { continue };
                     if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
                         continue;
                     }
@@ -346,16 +464,18 @@ pub fn find_all_moves(fixed: &Board, rack: &[u8], dict: &HashSet<&str>) -> Vec<M
             }
         }
     }
-    let mut all: Vec<Move> = moves.into_values().collect();
-    all.sort_by(|a, b| b.score.cmp(&a.score));
-    all
+    // Deterministic order: score descending, canonical tile key as the
+    // tie-break (the view targets moves[0], so ties must not be arbitrary).
+    let mut all: Vec<(String, Move)> = moves.into_iter().collect();
+    all.sort_by(|a, b| b.1.score.cmp(&a.1.score).then_with(|| a.0.cmp(&b.0)));
+    all.into_iter().map(|(_, m)| m).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn fit_word(
-    fixed: &Board,
+    fixed: &Grid,
     rack_counts: &[u16; 26],
-    near_fixed: &HashSet<(i32, i32)>,
+    near_fixed: &[bool; 225],
     word: &str,
     row: i32,
     col: i32,
@@ -364,10 +484,10 @@ fn fit_word(
 ) -> Option<Vec<Tile>> {
     // The candidate must be the whole line segment.
     let len = word.len() as i32;
-    if fixed.contains_key(&(row - d_row, col - d_col)) {
+    if fixed.has(row - d_row, col - d_col) {
         return None;
     }
-    if fixed.contains_key(&(row + d_row * len, col + d_col * len)) {
+    if fixed.has(row + d_row * len, col + d_col * len) {
         return None;
     }
 
@@ -377,10 +497,11 @@ fn fit_word(
     for (i, letter) in word.bytes().enumerate() {
         let r = row + d_row * i as i32;
         let c = col + d_col * i as i32;
-        if near_fixed.contains(&(r, c)) {
+        if near_fixed[(r * BOARD_SIZE + c) as usize] {
             touches = true;
         }
-        if let Some(&existing) = fixed.get(&(r, c)) {
+        let existing = fixed.at(r, c);
+        if existing != 0 {
             if existing != letter {
                 return None;
             }
@@ -446,13 +567,24 @@ static DICT: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Opening words: the curated woordle five-letter list, uppercased, kept in
-/// file order (the RNG indexes into it).
-static OPENINGS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    include_str!("../../data/woordle/puzzle-words")
+static WORD_INDEX: LazyLock<Vec<WordEntry>> =
+    LazyLock::new(|| index_words(DICT.iter().copied()));
+
+/// Opening words: SWL words of 5-8 letters that contain a curated woordle
+/// word as a substring AND clear a real-world frequency bar (wordfreq
+/// Dutch zipf, second column; only >= 1.2 included, which keeps real-but-
+/// rare words and drops fabricated compounds). The closest available proxy
+/// for words people actually lay in Wordfeud, since no public played-game
+/// data exists. File order feeds the RNG.
+static OPENINGS: LazyLock<Vec<(String, f32)>> = LazyLock::new(|| {
+    include_str!("../../data/lettersoep/openings.txt")
         .split('\n')
-        .map(|w| w.trim().to_uppercase())
-        .filter(|w| w.len() == 5 && DICT.contains(w.as_str()))
+        .filter_map(|line| {
+            let mut parts = line.trim().split(' ');
+            let word = parts.next()?.to_string();
+            let zipf: f32 = parts.next()?.parse().ok()?;
+            (!word.is_empty()).then_some((word, zipf))
+        })
         .collect()
 });
 
@@ -460,16 +592,20 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
     let seed = seed_for_date(date);
     let mut rng = Rng::new(seed);
     for _ in 1..=MAX_ATTEMPTS {
-        let Some(placed) = place_opening_words(&mut rng, &OPENINGS) else { continue };
+        let Some(placed) = simulate_opening(&mut rng, &OPENINGS, &DICT) else { continue };
         let board = build_board(&placed);
         let used: Vec<u8> = board.values().copied().collect();
         let rack = draw_rack(&mut rng, &used);
-        let moves = find_all_moves(&board, &rack, &DICT);
+        let moves = find_all_moves(&board, &rack, &WORD_INDEX, &DICT);
         if moves.len() < MIN_MOVES {
             continue;
         }
         let max_score = moves[0].score;
         if max_score < MIN_MAX_SCORE {
+            continue;
+        }
+        // The daily hunt is the bingo: reject racks that cannot play one.
+        if !moves.iter().any(|m| m.bingo) {
             continue;
         }
         let valid_words: BTreeSet<String> = moves
@@ -480,7 +616,7 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
             date: date.to_string(),
             number: puzzle_number(date),
             seed,
-            view: pick_view(&mut rng, &board),
+            view: pick_view(&mut rng, &board, &moves[0]),
             placed,
             rack: rack.iter().map(|&l| l as char).collect(),
             max_score,
@@ -491,41 +627,130 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
     anyhow::bail!("no acceptable puzzle found for seed {seed} in {MAX_ATTEMPTS} attempts")
 }
 
-fn place_opening_words(rng: &mut Rng, openings: &[String]) -> Option<Vec<PlacedWord>> {
-    let first = &openings[rng.next_below(openings.len() as u32) as usize];
-    let center_index = rng.next_below(first.len() as u32) as i32;
-    let first_col = CENTER - center_index;
+/// Simulate the opening of a running game: a first word through the center
+/// square, then more words from the pool played as actual legal moves
+/// (crossings or parallel plays whose cross-words all validate). Boards
+/// spread organically instead of always crossing dead-center.
+///
+/// Each day has a board profile for variety: 3-7 words, a length flavor
+/// (short, mixed, long) and a rarity flavor — most days common words, some
+/// days easier, some days rarer words that reward a deep vocabulary.
+fn simulate_opening(
+    rng: &mut Rng,
+    openings: &[(String, f32)],
+    dict: &HashSet<&str>,
+) -> Option<Vec<PlacedWord>> {
+    let word_count = 3 + rng.next_below(5); // 3..=7 words on the board
+    let len_flavor = rng.next_below(3); // 0 = short 5-6, 1 = mixed, 2 = long 7-8
+    let rarity = rng.next_below(4); // 0-1 = normal, 2 = common, 3 = tricky
+    let fits = |word: &str, zipf: f32| -> bool {
+        let len_ok = match len_flavor {
+            0 => word.len() <= 6,
+            2 => word.len() >= 7,
+            _ => true,
+        };
+        let zipf_ok = match rarity {
+            2 => zipf >= 3.0,
+            3 => (1.2..2.5).contains(&zipf),
+            _ => zipf >= 2.0,
+        };
+        len_ok && zipf_ok
+    };
+    let mut pool: Vec<&String> =
+        openings.iter().filter(|(w, z)| fits(w, *z)).map(|(w, _)| w).collect();
+    if pool.len() < 100 {
+        // Degenerate flavor combination: fall back to the length band alone.
+        pool = openings
+            .iter()
+            .filter(|(w, z)| fits(w, *z) || *z >= 2.0)
+            .map(|(w, _)| w)
+            .collect();
+    }
 
-    for _ in 0..20 {
-        let second = &openings[rng.next_below(openings.len() as u32) as usize];
-        if second == first {
-            continue;
+    let first = pool[rng.next_below(pool.len() as u32) as usize];
+    let len = first.len() as i32;
+    let center_index = rng.next_below(first.len() as u32) as i32;
+    let across = rng.next_below(2) == 0;
+    let start = CENTER - center_index;
+    if start < 1 || start + len > BOARD_SIZE - 1 {
+        return None;
+    }
+    let (row, col) = if across { (CENTER, start) } else { (start, CENTER) };
+    let mut placed = vec![PlacedWord {
+        row,
+        col,
+        dir: if across { "across" } else { "down" },
+        word: first.clone(),
+    }];
+    let mut board = build_board(&placed);
+
+    for _ in 1..word_count {
+        let mut played = false;
+        for _ in 0..30 {
+            let word = pool[rng.next_below(pool.len() as u32) as usize];
+            let options = enumerate_word_placements(&board, word, dict);
+            if options.is_empty() {
+                continue;
+            }
+            let &(row, col, across) =
+                &options[rng.next_below(options.len() as u32) as usize];
+            placed.push(PlacedWord {
+                row,
+                col,
+                dir: if across { "across" } else { "down" },
+                word: word.clone(),
+            });
+            board = build_board(&placed);
+            played = true;
+            break;
         }
-        let mut crossings = Vec::new();
-        for (i1, l1) in first.bytes().enumerate() {
-            for (i2, l2) in second.bytes().enumerate() {
-                if l1 == l2 {
-                    crossings.push((i1 as i32, i2 as i32));
-                }
+        if !played {
+            return None;
+        }
+    }
+    Some(placed)
+}
+
+/// Every legal placement of `word` on the board (as a real move: connected,
+/// non-conflicting, all formed words in the dictionary), in deterministic
+/// board order so the RNG's pick is reproducible.
+fn enumerate_word_placements(
+    board: &Board,
+    word: &str,
+    dict: &HashSet<&str>,
+) -> Vec<(i32, i32, bool)> {
+    let grid = Grid::from_board(board);
+    let rack_counts = count_letters(word.bytes());
+    let mut near_fixed = [false; 225];
+    for &(row, col) in board.keys() {
+        for (dr, dc) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
+            let (r, c) = (row + dr, col + dc);
+            if (0..BOARD_SIZE).contains(&r) && (0..BOARD_SIZE).contains(&c) {
+                near_fixed[(r * BOARD_SIZE + c) as usize] = true;
             }
         }
-        if crossings.is_empty() {
-            continue;
-        }
-        let (i1, i2) = crossings[rng.next_below(crossings.len() as u32) as usize];
-        let second_row = CENTER - i2;
-        if second_row < 1 || second_row + second.len() as i32 > BOARD_SIZE - 1 {
-            continue;
-        }
-        if first_col < 1 || first_col + first.len() as i32 > BOARD_SIZE - 1 {
-            continue;
-        }
-        return Some(vec![
-            PlacedWord { row: CENTER, col: first_col, dir: "across", word: first.clone() },
-            PlacedWord { row: second_row, col: first_col + i1, dir: "down", word: second.clone() },
-        ]);
     }
-    None
+    let len = word.len() as i32;
+    let mut out = Vec::new();
+    for across in [true, false] {
+        for line in 0..BOARD_SIZE {
+            for pos in 0..=(BOARD_SIZE - len) {
+                let (row, col) = if across { (line, pos) } else { (pos, line) };
+                let (d_row, d_col) = if across { (0, 1) } else { (1, 0) };
+                let Some(tiles) =
+                    fit_word(&grid, &rack_counts, &near_fixed, word, row, col, d_row, d_col)
+                else {
+                    continue;
+                };
+                let Some(scored) = score_placement_grid(&grid, &tiles) else { continue };
+                if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
+                    continue;
+                }
+                out.push((row, col, across));
+            }
+        }
+    }
+    out
 }
 
 fn build_board(placed: &[PlacedWord]) -> Board {
@@ -569,24 +794,50 @@ fn draw_rack(rng: &mut Rng, used: &[u8]) -> Vec<u8> {
     bag[..RACK_SIZE].to_vec()
 }
 
-fn pick_view(rng: &mut Rng, board: &Board) -> ViewRect {
+/// A tight window placed so the best-scoring move — including the fixed
+/// letters its main word runs through — is fully visible, jittered within
+/// the slack so the target's position gives nothing away. Other board words
+/// may fall (partly) into the fog: you walked in mid-game.
+fn pick_view(rng: &mut Rng, board: &Board, best: &Move) -> ViewRect {
+    let grid = Grid::from_board(board);
     let mut min_row = BOARD_SIZE;
     let mut max_row = 0;
     let mut min_col = BOARD_SIZE;
     let mut max_col = 0;
-    for &(row, col) in board.keys() {
-        min_row = min_row.min(row);
-        max_row = max_row.max(row);
-        min_col = min_col.min(col);
-        max_col = max_col.max(col);
+    for t in &best.tiles {
+        min_row = min_row.min(t.row);
+        max_row = max_row.max(t.row);
+        min_col = min_col.min(t.col);
+        max_col = max_col.max(t.col);
     }
-    let rows = VIEW_ROWS.max(max_row - min_row + 3);
-    let cols = VIEW_COLS.max(max_col - min_col + 3);
+    // Extend along the main word's line over fixed letters at both ends.
+    let across = best.tiles.iter().all(|t| t.row == best.tiles[0].row)
+        && (best.tiles.len() > 1 || {
+            let t = &best.tiles[0];
+            grid.has(t.row, t.col - 1) || grid.has(t.row, t.col + 1)
+        });
+    if across {
+        while grid.has(min_row, min_col - 1) {
+            min_col -= 1;
+        }
+        while grid.has(max_row, max_col + 1) {
+            max_col += 1;
+        }
+    } else {
+        while grid.has(min_row - 1, min_col) {
+            min_row -= 1;
+        }
+        while grid.has(max_row + 1, max_col) {
+            max_row += 1;
+        }
+    }
+    let rows = VIEW_ROWS.max(max_row - min_row + 1);
+    let cols = VIEW_COLS.max(max_col - min_col + 1);
     let top_slack = rows - (max_row - min_row + 1);
     let left_slack = cols - (max_col - min_col + 1);
-    let top = (min_row - 1 - rng.next_below(1.max(top_slack - 1) as u32) as i32)
+    let top = (min_row - rng.next_below((top_slack + 1) as u32) as i32)
         .clamp(0, BOARD_SIZE - rows);
-    let left = (min_col - 1 - rng.next_below(1.max(left_slack - 1) as u32) as i32)
+    let left = (min_col - rng.next_below((left_slack + 1) as u32) as i32)
         .clamp(0, BOARD_SIZE - cols);
     ViewRect { top, left, rows, cols }
 }
@@ -604,28 +855,53 @@ mod tests {
     fn day_one_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let puzzle = daily_puzzle(date).unwrap();
-        assert_eq!(puzzle.seed, 3068585657);
+        assert_eq!(puzzle.seed, 900493200);
         assert_eq!(puzzle.number, 1);
         let words: Vec<(&str, i32, i32, &str)> = puzzle
             .placed
             .iter()
             .map(|p| (p.word.as_str(), p.row, p.col, p.dir))
             .collect();
-        assert_eq!(words, vec![("PAUZE", 7, 3, "across"), ("VLOER", 4, 7, "down")]);
-        assert_eq!(puzzle.rack, vec!['R', 'E', 'G', 'Z', 'E', 'E', 'O']);
+        assert_eq!(
+            words,
+            vec![
+                ("NIETSNUT", 3, 7, "down"),
+                ("BRANDING", 3, 1, "across"),
+                ("GEMAKJE", 0, 3, "down"),
+                ("TWISTER", 10, 3, "across"),
+                ("AFGUNST", 0, 1, "across"),
+                ("REGELDEN", 8, 0, "across"),
+            ]
+        );
+        assert_eq!(puzzle.rack, vec!['A', 'N', 'A', 'S', 'E', 'F', 'M']);
         assert_eq!(
             (puzzle.view.top, puzzle.view.left, puzzle.view.rows, puzzle.view.cols),
-            (3, 1, 9, 8)
+            (3, 3, 9, 8)
         );
-        assert_eq!(puzzle.max_score, 76);
-        assert_eq!(puzzle.move_count, 374);
-        assert_eq!(puzzle.valid_words.len(), 312);
-        assert_eq!(&puzzle.valid_words[..3], ["AGEER", "AGERE", "AR"]);
+        assert_eq!(puzzle.max_score, 136);
+        assert_eq!(puzzle.move_count, 931);
+        assert_eq!(puzzle.valid_words.len(), 459);
+        assert_eq!(&puzzle.valid_words[..3], ["AAD", "AAM", "AAN"]);
+    }
+
+    /// Manual benchmark: cargo test --release -- --ignored --nocapture bench
+    #[test]
+    #[ignore]
+    fn bench_generation() {
+        LazyLock::force(&WORD_INDEX);
+        let days = 20u32;
+        let start = std::time::Instant::now();
+        for i in 0..days {
+            let date = epoch() + chrono::Duration::days(i as i64);
+            daily_puzzle(date).unwrap();
+        }
+        let elapsed = start.elapsed();
+        println!("{days} puzzles in {elapsed:?} ({:?}/puzzle)", elapsed / days);
     }
 
     #[test]
     fn seed_derivation_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
-        assert_eq!(seed_for_date(date), 3018252800);
+        assert_eq!(seed_for_date(date), 950826057);
     }
 }

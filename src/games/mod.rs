@@ -1,3 +1,4 @@
+pub mod lettersoep;
 pub mod sudokudo;
 pub mod woordle;
 

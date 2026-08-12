@@ -15,6 +15,8 @@ enum Command {
     Serve,
     /// Read sudoku puzzle rows as JSONL on stdin and upsert them.
     SeedSudoku,
+    /// Print the lettersoep daily puzzle for a date (default today, UTC) as JSON.
+    GenerateLettersoep { date: Option<String> },
 }
 
 #[tokio::main]
@@ -50,6 +52,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::SeedSudoku => {
             seed::seed_sudoku_from_stdin(&pool).await?;
+        }
+        Command::GenerateLettersoep { date } => {
+            let date = match date {
+                Some(d) => d.parse()?,
+                None => chrono::Utc::now().date_naive(),
+            };
+            let puzzle = jellespelletjes_api::games::lettersoep::daily_puzzle(date)?;
+            println!("{}", serde_json::to_string_pretty(&puzzle)?);
         }
     }
     Ok(())

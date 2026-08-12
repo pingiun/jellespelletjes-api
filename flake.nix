@@ -58,6 +58,8 @@
                 "https://jellespelletjes.nl"
                 "https://sudokudo.nl"
                 "https://woordle.nl"
+                "https://lettersoep.com"
+                "https://lettersoup.app"
               ];
               description = "Origins allowed for CORS and SSO.";
             };

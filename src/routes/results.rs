@@ -49,11 +49,11 @@ pub async fn put_result(
         return Err(err(StatusCode::NOT_FOUND, "unknown game"));
     }
 
-    let payload = if game == "lettersoep" {
+    let payload = if let Some(lang) = lettersoep::Lang::from_game(&game) {
         let submission: lettersoep::LettersoepSubmission =
             serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
         // Verification may generate the day's puzzle (~1s of CPU).
-        tokio::task::spawn_blocking(move || lettersoep::verify(day, &submission))
+        tokio::task::spawn_blocking(move || lettersoep::verify(lang, day, &submission))
             .await
             .map_err(internal)?
             .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.message()))?

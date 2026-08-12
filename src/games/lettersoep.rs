@@ -12,7 +12,76 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
-pub const GENERATOR_VERSION: &str = "v4"; // v4: frequency-filtered pool, view targets the best move
+/// The two lettersoep games: Dutch (lettersoep, SWL word list) and English
+/// (lettersoup, ENABLE2K). Each language is its own game with its own word
+/// lists, letter bag, letter values and generator era; the board layout and
+/// generation algorithm are shared.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lang {
+    Nl,
+    En,
+}
+
+impl Lang {
+    pub fn from_game(game: &str) -> Option<Lang> {
+        match game {
+            "lettersoep" => Some(Lang::Nl),
+            "lettersoup" => Some(Lang::En),
+            _ => None,
+        }
+    }
+
+    pub fn game(self) -> &'static str {
+        match self {
+            Lang::Nl => "lettersoep",
+            Lang::En => "lettersoup",
+        }
+    }
+
+    /// Generator era per language. Bump on any generation change, so a
+    /// change is an explicit new era rather than silently remapping dates.
+    pub fn version(self) -> &'static str {
+        match self {
+            Lang::Nl => "v4", // v4: frequency-filtered pool, view targets the best move
+            Lang::En => "v1",
+        }
+    }
+
+    fn dict(self) -> &'static HashSet<&'static str> {
+        match self {
+            Lang::Nl => &DICT_NL,
+            Lang::En => &DICT_EN,
+        }
+    }
+
+    fn word_index(self) -> &'static [WordEntry] {
+        match self {
+            Lang::Nl => &WORD_INDEX_NL,
+            Lang::En => &WORD_INDEX_EN,
+        }
+    }
+
+    fn openings(self) -> &'static [(String, f32)] {
+        match self {
+            Lang::Nl => &OPENINGS_NL,
+            Lang::En => &OPENINGS_EN,
+        }
+    }
+
+    fn bag(self) -> &'static [(u8, u8); 26] {
+        match self {
+            Lang::Nl => &BAG_NL,
+            Lang::En => &BAG_EN,
+        }
+    }
+
+    fn letter_value(self, letter: u8) -> u32 {
+        match self {
+            Lang::Nl => letter_value_nl(letter),
+            Lang::En => letter_value_en(letter),
+        }
+    }
+}
 
 /// Launch day: puzzle #1 appears on this UTC date (placeholder for now).
 pub fn epoch() -> NaiveDate {
@@ -68,8 +137,8 @@ impl Rng {
     }
 }
 
-pub fn seed_for_date(date: NaiveDate) -> u32 {
-    fnv1a(&format!("lettersoep:{GENERATOR_VERSION}:{date}"))
+pub fn seed_for_date(date: NaiveDate, lang: Lang) -> u32 {
+    fnv1a(&format!("{}:{}:{date}", lang.game(), lang.version()))
 }
 
 pub fn puzzle_number(date: NaiveDate) -> i64 {
@@ -79,7 +148,7 @@ pub fn puzzle_number(date: NaiveDate) -> i64 {
 // ---------------------------------------------------------------- letters
 
 /// Dutch Scrabble letter values.
-fn letter_value(letter: u8) -> u32 {
+fn letter_value_nl(letter: u8) -> u32 {
     match letter {
         b'A' | b'E' | b'I' | b'N' | b'O' => 1,
         b'D' | b'R' | b'S' | b'T' => 2,
@@ -92,13 +161,34 @@ fn letter_value(letter: u8) -> u32 {
     }
 }
 
-/// Official Dutch Scrabble bag (blanks left out), in A..Z order — the order
+/// Official English Scrabble letter values.
+fn letter_value_en(letter: u8) -> u32 {
+    match letter {
+        b'A' | b'E' | b'I' | b'L' | b'N' | b'O' | b'R' | b'S' | b'T' | b'U' => 1,
+        b'D' | b'G' => 2,
+        b'B' | b'C' | b'M' | b'P' => 3,
+        b'F' | b'H' | b'V' | b'W' | b'Y' => 4,
+        b'K' => 5,
+        b'J' | b'X' => 8,
+        b'Q' | b'Z' => 10,
+        _ => 0,
+    }
+}
+
+/// Official Scrabble bags (blanks left out), in A..Z order — the order
 /// matters because the bag Vec feeds the shuffle.
-const BAG_COUNTS: [(u8, u8); 26] = [
+const BAG_NL: [(u8, u8); 26] = [
     (b'A', 6), (b'B', 2), (b'C', 2), (b'D', 5), (b'E', 18), (b'F', 2), (b'G', 3),
     (b'H', 2), (b'I', 4), (b'J', 2), (b'K', 3), (b'L', 3), (b'M', 3), (b'N', 10),
     (b'O', 6), (b'P', 2), (b'Q', 1), (b'R', 5), (b'S', 5), (b'T', 5), (b'U', 3),
     (b'V', 2), (b'W', 2), (b'X', 1), (b'Y', 1), (b'Z', 2),
+];
+
+const BAG_EN: [(u8, u8); 26] = [
+    (b'A', 9), (b'B', 2), (b'C', 2), (b'D', 4), (b'E', 12), (b'F', 2), (b'G', 3),
+    (b'H', 2), (b'I', 9), (b'J', 1), (b'K', 1), (b'L', 4), (b'M', 2), (b'N', 6),
+    (b'O', 8), (b'P', 2), (b'Q', 1), (b'R', 6), (b'S', 4), (b'T', 6), (b'U', 4),
+    (b'V', 2), (b'W', 2), (b'X', 1), (b'Y', 2), (b'Z', 1),
 ];
 
 fn is_vowel(letter: u8) -> bool {
@@ -204,11 +294,11 @@ pub struct Scored {
 /// Port of score.ts scorePlacement: validate a placement's geometry against
 /// the fixed board and score it (premiums only under new tiles, cross-words
 /// count, 7 tiles = bingo).
-pub fn score_placement(fixed: &Board, placed: &[Tile]) -> Option<Scored> {
-    score_placement_grid(&Grid::from_board(fixed), placed)
+pub fn score_placement(lang: Lang, fixed: &Board, placed: &[Tile]) -> Option<Scored> {
+    score_placement_grid(lang, &Grid::from_board(fixed), placed)
 }
 
-fn score_placement_grid(fixed: &Grid, placed: &[Tile]) -> Option<Scored> {
+fn score_placement_grid(lang: Lang, fixed: &Grid, placed: &[Tile]) -> Option<Scored> {
     if placed.is_empty() {
         return None;
     }
@@ -268,7 +358,7 @@ fn score_placement_grid(fixed: &Grid, placed: &[Tile]) -> Option<Scored> {
             word.push(letter as char);
             let premium =
                 if placed_at(row, col).is_some() { premium_at(row, col) } else { None };
-            let mut value = letter_value(letter);
+            let mut value = lang.letter_value(letter);
             match premium {
                 Some(Premium::Dl) => value *= 2,
                 Some(Premium::Tl) => value *= 3,
@@ -373,6 +463,7 @@ fn counts_fit(needed: &[u8; 32], avail: &[u8; 32]) -> bool {
 /// prune candidates, and per-line anchor ranges limit placements to lines
 /// that can actually touch the board.
 pub fn find_all_moves(
+    lang: Lang,
     fixed: &Board,
     rack: &[u8],
     index: &[WordEntry],
@@ -445,7 +536,7 @@ pub fn find_all_moves(
                     else {
                         continue;
                     };
-                    let Some(scored) = score_placement_grid(&grid, &tiles) else { continue };
+                    let Some(scored) = score_placement_grid(lang, &grid, &tiles) else { continue };
                     if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
                         continue;
                     }
@@ -560,16 +651,19 @@ const MIN_MOVES: usize = 100;
 const MIN_MAX_SCORE: u32 = 30;
 const MAX_ATTEMPTS: u32 = 100;
 
-static DICT: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    include_str!("../../data/lettersoep/words.txt")
-        .split('\n')
-        .map(str::trim)
-        .filter(|w| !w.is_empty())
-        .collect()
-});
+fn parse_dict(raw: &'static str) -> HashSet<&'static str> {
+    raw.split('\n').map(str::trim).filter(|w| !w.is_empty()).collect()
+}
 
-static WORD_INDEX: LazyLock<Vec<WordEntry>> =
-    LazyLock::new(|| index_words(DICT.iter().copied()));
+static DICT_NL: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| parse_dict(include_str!("../../data/lettersoep/words.txt")));
+static DICT_EN: LazyLock<HashSet<&'static str>> =
+    LazyLock::new(|| parse_dict(include_str!("../../data/lettersoep/words-en.txt")));
+
+static WORD_INDEX_NL: LazyLock<Vec<WordEntry>> =
+    LazyLock::new(|| index_words(DICT_NL.iter().copied()));
+static WORD_INDEX_EN: LazyLock<Vec<WordEntry>> =
+    LazyLock::new(|| index_words(DICT_EN.iter().copied()));
 
 /// Opening words: SWL words of 5-8 letters that contain a curated woordle
 /// word as a substring AND clear a real-world frequency bar (wordfreq
@@ -577,9 +671,8 @@ static WORD_INDEX: LazyLock<Vec<WordEntry>> =
 /// rare words and drops fabricated compounds). The closest available proxy
 /// for words people actually lay in Wordfeud, since no public played-game
 /// data exists. File order feeds the RNG.
-static OPENINGS: LazyLock<Vec<(String, f32)>> = LazyLock::new(|| {
-    include_str!("../../data/lettersoep/openings.txt")
-        .split('\n')
+fn parse_openings(raw: &'static str) -> Vec<(String, f32)> {
+    raw.split('\n')
         .filter_map(|line| {
             let mut parts = line.trim().split(' ');
             let word = parts.next()?.to_string();
@@ -587,31 +680,36 @@ static OPENINGS: LazyLock<Vec<(String, f32)>> = LazyLock::new(|| {
             (!word.is_empty()).then_some((word, zipf))
         })
         .collect()
-});
+}
 
-static PUZZLES: LazyLock<Mutex<HashMap<NaiveDate, Arc<DailyPuzzle>>>> =
+static OPENINGS_NL: LazyLock<Vec<(String, f32)>> =
+    LazyLock::new(|| parse_openings(include_str!("../../data/lettersoep/openings.txt")));
+static OPENINGS_EN: LazyLock<Vec<(String, f32)>> =
+    LazyLock::new(|| parse_openings(include_str!("../../data/lettersoep/openings-en.txt")));
+
+static PUZZLES: LazyLock<Mutex<HashMap<(NaiveDate, Lang), Arc<DailyPuzzle>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The daily puzzle with an in-memory cache: generation costs ~1s, and both
 /// the serving route and result verification need the same puzzle.
-pub fn cached_puzzle(date: NaiveDate) -> anyhow::Result<Arc<DailyPuzzle>> {
-    if let Some(puzzle) = PUZZLES.lock().unwrap().get(&date) {
+pub fn cached_puzzle(date: NaiveDate, lang: Lang) -> anyhow::Result<Arc<DailyPuzzle>> {
+    if let Some(puzzle) = PUZZLES.lock().unwrap().get(&(date, lang)) {
         return Ok(puzzle.clone());
     }
-    let puzzle = Arc::new(daily_puzzle(date)?);
-    PUZZLES.lock().unwrap().insert(date, puzzle.clone());
+    let puzzle = Arc::new(daily_puzzle(date, lang)?);
+    PUZZLES.lock().unwrap().insert((date, lang), puzzle.clone());
     Ok(puzzle)
 }
 
-pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
-    let seed = seed_for_date(date);
+pub fn daily_puzzle(date: NaiveDate, lang: Lang) -> anyhow::Result<DailyPuzzle> {
+    let seed = seed_for_date(date, lang);
     let mut rng = Rng::new(seed);
     for _ in 1..=MAX_ATTEMPTS {
-        let Some(placed) = simulate_opening(&mut rng, &OPENINGS, &DICT) else { continue };
+        let Some(placed) = simulate_opening(&mut rng, lang) else { continue };
         let board = build_board(&placed);
         let used: Vec<u8> = board.values().copied().collect();
-        let rack = draw_rack(&mut rng, &used);
-        let moves = find_all_moves(&board, &rack, &WORD_INDEX, &DICT);
+        let rack = draw_rack(&mut rng, &used, lang.bag());
+        let moves = find_all_moves(lang, &board, &rack, lang.word_index(), lang.dict());
         if moves.len() < MIN_MOVES {
             continue;
         }
@@ -631,7 +729,7 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
             date: date.to_string(),
             number: puzzle_number(date),
             seed,
-            generator_version: GENERATOR_VERSION,
+            generator_version: lang.version(),
             view: pick_view(&mut rng, &board, &moves[0]),
             placed,
             rack: rack.iter().map(|&l| l as char).collect(),
@@ -651,11 +749,9 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
 /// Each day has a board profile for variety: 3-7 words, a length flavor
 /// (short, mixed, long) and a rarity flavor — most days common words, some
 /// days easier, some days rarer words that reward a deep vocabulary.
-fn simulate_opening(
-    rng: &mut Rng,
-    openings: &[(String, f32)],
-    dict: &HashSet<&str>,
-) -> Option<Vec<PlacedWord>> {
+fn simulate_opening(rng: &mut Rng, lang: Lang) -> Option<Vec<PlacedWord>> {
+    let openings = lang.openings();
+    let dict = lang.dict();
     let word_count = 3 + rng.next_below(5); // 3..=7 words on the board
     let len_flavor = rng.next_below(3); // 0 = short 5-6, 1 = mixed, 2 = long 7-8
     let rarity = rng.next_below(4); // 0-1 = normal, 2 = common, 3 = tricky
@@ -704,7 +800,7 @@ fn simulate_opening(
         let mut played = false;
         for _ in 0..30 {
             let word = pool[rng.next_below(pool.len() as u32) as usize];
-            let options = enumerate_word_placements(&board, word, dict);
+            let options = enumerate_word_placements(lang, &board, word, dict);
             if options.is_empty() {
                 continue;
             }
@@ -731,6 +827,7 @@ fn simulate_opening(
 /// non-conflicting, all formed words in the dictionary), in deterministic
 /// board order so the RNG's pick is reproducible.
 fn enumerate_word_placements(
+    lang: Lang,
     board: &Board,
     word: &str,
     dict: &HashSet<&str>,
@@ -758,7 +855,7 @@ fn enumerate_word_placements(
                 else {
                     continue;
                 };
-                let Some(scored) = score_placement_grid(&grid, &tiles) else { continue };
+                let Some(scored) = score_placement_grid(lang, &grid, &tiles) else { continue };
                 if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
                     continue;
                 }
@@ -783,8 +880,8 @@ fn build_board(placed: &[PlacedWord]) -> Board {
     board
 }
 
-fn draw_rack(rng: &mut Rng, used: &[u8]) -> Vec<u8> {
-    let mut remaining: HashMap<u8, u8> = BAG_COUNTS.iter().copied().collect();
+fn draw_rack(rng: &mut Rng, used: &[u8], bag_counts: &[(u8, u8); 26]) -> Vec<u8> {
+    let mut remaining: HashMap<u8, u8> = bag_counts.iter().copied().collect();
     for letter in used {
         if let Some(n) = remaining.get_mut(letter) {
             if *n > 0 {
@@ -792,9 +889,9 @@ fn draw_rack(rng: &mut Rng, used: &[u8]) -> Vec<u8> {
             }
         }
     }
-    // Bag built in A..Z order, exactly like the TS Object.entries iteration.
+    // Bag built in A..Z order, exactly like the original TS iteration.
     let mut bag: Vec<u8> = Vec::new();
-    for (letter, _) in BAG_COUNTS {
+    for &(letter, _) in bag_counts {
         for _ in 0..remaining[&letter] {
             bag.push(letter);
         }
@@ -900,8 +997,12 @@ impl VerifyError {
 /// Verify a submitted move by regenerating the day's puzzle and scoring the
 /// tiles server-side; the normalized payload comes from our own scoring,
 /// never from client claims.
-pub fn verify(day: i64, submission: &LettersoepSubmission) -> Result<serde_json::Value, VerifyError> {
-    if submission.generator_version != GENERATOR_VERSION {
+pub fn verify(
+    lang: Lang,
+    day: i64,
+    submission: &LettersoepSubmission,
+) -> Result<serde_json::Value, VerifyError> {
+    if submission.generator_version != lang.version() {
         return Err(VerifyError::VersionMismatch);
     }
     let today = puzzle_number(chrono::Utc::now().date_naive());
@@ -914,7 +1015,7 @@ pub fn verify(day: i64, submission: &LettersoepSubmission) -> Result<serde_json:
         return Err(VerifyError::BadTimes);
     }
     let date = epoch() + chrono::Duration::days(day - 1);
-    let puzzle = cached_puzzle(date).map_err(|_| VerifyError::Generation)?;
+    let puzzle = cached_puzzle(date, lang).map_err(|_| VerifyError::Generation)?;
 
     // The tiles must come from the day's rack.
     let mut rack_counts = [0u16; 26];
@@ -944,9 +1045,9 @@ pub fn verify(day: i64, submission: &LettersoepSubmission) -> Result<serde_json:
         .map(|p| PlacedWord { row: p.row, col: p.col, dir: p.dir, word: p.word.clone() })
         .collect();
     let board = build_board(&placed);
-    let scored = score_placement(&board, &tiles).ok_or(VerifyError::IllegalMove)?;
+    let scored = score_placement(lang, &board, &tiles).ok_or(VerifyError::IllegalMove)?;
     for word in &scored.words {
-        if !DICT.contains(word.word.as_str()) {
+        if !lang.dict().contains(word.word.as_str()) {
             return Err(VerifyError::UnknownWord(word.word.clone()));
         }
     }
@@ -973,7 +1074,7 @@ mod tests {
     #[test]
     fn day_one_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
-        let puzzle = daily_puzzle(date).unwrap();
+        let puzzle = daily_puzzle(date, Lang::Nl).unwrap();
         assert_eq!(puzzle.seed, 900493200);
         assert_eq!(puzzle.number, 1);
         let words: Vec<(&str, i32, i32, &str)> = puzzle
@@ -1007,20 +1108,53 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_generation() {
-        LazyLock::force(&WORD_INDEX);
+        LazyLock::force(&WORD_INDEX_NL);
         let days = 20u32;
         let start = std::time::Instant::now();
         for i in 0..days {
             let date = epoch() + chrono::Duration::days(i as i64);
-            daily_puzzle(date).unwrap();
+            daily_puzzle(date, Lang::Nl).unwrap();
         }
         let elapsed = start.elapsed();
         println!("{days} puzzles in {elapsed:?} ({:?}/puzzle)", elapsed / days);
     }
 
+    /// Same pin for the English game (lettersoup, ENABLE2K, era v1).
+    #[test]
+    fn english_day_one_is_stable() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let puzzle = daily_puzzle(date, Lang::En).unwrap();
+        assert_eq!(puzzle.seed, 1211504969);
+        assert_eq!(puzzle.generator_version, "v1");
+        let words: Vec<(&str, i32, i32, &str)> = puzzle
+            .placed
+            .iter()
+            .map(|p| (p.word.as_str(), p.row, p.col, p.dir))
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                ("MISPRINT", 5, 7, "down"),
+                ("REVELLER", 9, 7, "across"),
+                ("DIPOLAR", 5, 12, "down"),
+                ("GROWLER", 8, 14, "down"),
+                ("ASCENTS", 13, 1, "across"),
+            ]
+        );
+        assert_eq!(puzzle.rack, vec!['O', 'T', 'E', 'D', 'U', 'R', 'O']);
+        assert_eq!(
+            (puzzle.view.top, puzzle.view.left, puzzle.view.rows, puzzle.view.cols),
+            (0, 0, 9, 8)
+        );
+        assert_eq!(puzzle.max_score, 83);
+        assert_eq!(puzzle.move_count, 1216);
+        assert_eq!(puzzle.valid_words.len(), 548);
+        assert_eq!(&puzzle.valid_words[..3], ["AD", "ADO", "AE"]);
+    }
+
     #[test]
     fn seed_derivation_is_stable() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
-        assert_eq!(seed_for_date(date), 950826057);
+        assert_eq!(seed_for_date(date, Lang::Nl), 950826057);
     }
 }

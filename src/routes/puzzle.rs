@@ -13,8 +13,11 @@ use chrono::{NaiveDate, Utc};
 
 pub async fn lettersoep_puzzle(
     State(_state): State<SharedState>,
-    Path(date): Path<String>,
+    Path((game, date)): Path<(String, String)>,
 ) -> Response {
+    let Some(lang) = lettersoep::Lang::from_game(&game) else {
+        return (StatusCode::NOT_FOUND, "unknown game").into_response();
+    };
     let Ok(date) = date.parse::<NaiveDate>() else {
         return (StatusCode::BAD_REQUEST, "invalid date").into_response();
     };
@@ -26,7 +29,7 @@ pub async fn lettersoep_puzzle(
     // Generation takes ~1s of CPU on a cache miss: do it off the runtime.
     // (The cache in games::lettersoep is shared with result verification.)
     let generated = tokio::task::spawn_blocking(move || {
-        lettersoep::cached_puzzle(date).and_then(|p| Ok(serde_json::to_string(&*p)?))
+        lettersoep::cached_puzzle(date, lang).and_then(|p| Ok(serde_json::to_string(&*p)?))
     })
     .await;
     match generated {

@@ -22,7 +22,7 @@ impl Config {
             .unwrap_or_else(|_| "https://jellespelletjes.nl".to_string());
         let allowed_origins = std::env::var("ALLOWED_ORIGINS")
             .unwrap_or_else(|_| {
-                "https://jellespelletjes.nl,https://sudokudo.nl,https://woordle.nl".to_string()
+                "https://jellespelletjes.nl,https://sudokudo.nl,https://woordle.nl,https://lettersoep.nl".to_string()
             })
             .split(',')
             .map(|s| s.trim().trim_end_matches('/').to_string())

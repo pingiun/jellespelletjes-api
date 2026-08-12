@@ -8,9 +8,9 @@
 //! output. Scoring changes must be mirrored in the client's score.ts.
 
 use chrono::NaiveDate;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub const GENERATOR_VERSION: &str = "v4"; // v4: frequency-filtered pool, view targets the best move
 
@@ -545,6 +545,7 @@ pub struct DailyPuzzle {
     pub date: String,
     pub number: i64,
     pub seed: u32,
+    pub generator_version: &'static str,
     pub view: ViewRect,
     pub placed: Vec<PlacedWord>,
     pub rack: Vec<char>,
@@ -588,6 +589,20 @@ static OPENINGS: LazyLock<Vec<(String, f32)>> = LazyLock::new(|| {
         .collect()
 });
 
+static PUZZLES: LazyLock<Mutex<HashMap<NaiveDate, Arc<DailyPuzzle>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The daily puzzle with an in-memory cache: generation costs ~1s, and both
+/// the serving route and result verification need the same puzzle.
+pub fn cached_puzzle(date: NaiveDate) -> anyhow::Result<Arc<DailyPuzzle>> {
+    if let Some(puzzle) = PUZZLES.lock().unwrap().get(&date) {
+        return Ok(puzzle.clone());
+    }
+    let puzzle = Arc::new(daily_puzzle(date)?);
+    PUZZLES.lock().unwrap().insert(date, puzzle.clone());
+    Ok(puzzle)
+}
+
 pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
     let seed = seed_for_date(date);
     let mut rng = Rng::new(seed);
@@ -616,6 +631,7 @@ pub fn daily_puzzle(date: NaiveDate) -> anyhow::Result<DailyPuzzle> {
             date: date.to_string(),
             number: puzzle_number(date),
             seed,
+            generator_version: GENERATOR_VERSION,
             view: pick_view(&mut rng, &board, &moves[0]),
             placed,
             rack: rack.iter().map(|&l| l as char).collect(),
@@ -840,6 +856,109 @@ fn pick_view(rng: &mut Rng, board: &Board, best: &Move) -> ViewRect {
     let left = (min_col - rng.next_below((left_slack + 1) as u32) as i32)
         .clamp(0, BOARD_SIZE - cols);
     ViewRect { top, left, rows, cols }
+}
+
+// ---------------------------------------------------------------- verify
+
+#[derive(Deserialize)]
+pub struct SubmittedTile {
+    pub row: i32,
+    pub col: i32,
+    pub letter: String,
+}
+
+#[derive(Deserialize)]
+pub struct LettersoepSubmission {
+    pub tiles: Vec<SubmittedTile>,
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub generator_version: String,
+}
+
+pub enum VerifyError {
+    DayInFuture,
+    VersionMismatch,
+    BadTimes,
+    IllegalMove,
+    UnknownWord(String),
+    Generation,
+}
+
+impl VerifyError {
+    pub fn message(&self) -> String {
+        match self {
+            VerifyError::DayInFuture => "puzzle day is in the future".into(),
+            VerifyError::VersionMismatch => "generator version mismatch".into(),
+            VerifyError::BadTimes => "invalid start/finish timestamps".into(),
+            VerifyError::IllegalMove => "tiles do not form a legal move".into(),
+            VerifyError::UnknownWord(w) => format!("{w} is not in the word list"),
+            VerifyError::Generation => "puzzle generation failed".into(),
+        }
+    }
+}
+
+/// Verify a submitted move by regenerating the day's puzzle and scoring the
+/// tiles server-side; the normalized payload comes from our own scoring,
+/// never from client claims.
+pub fn verify(day: i64, submission: &LettersoepSubmission) -> Result<serde_json::Value, VerifyError> {
+    if submission.generator_version != GENERATOR_VERSION {
+        return Err(VerifyError::VersionMismatch);
+    }
+    let today = puzzle_number(chrono::Utc::now().date_naive());
+    // ±1 day of slack: players finish on their own local calendar.
+    if day > today + 1 {
+        return Err(VerifyError::DayInFuture);
+    }
+    let elapsed_ms = submission.finished_at_ms - submission.started_at_ms;
+    if elapsed_ms <= 0 || elapsed_ms > 12 * 3600 * 1000 {
+        return Err(VerifyError::BadTimes);
+    }
+    let date = epoch() + chrono::Duration::days(day - 1);
+    let puzzle = cached_puzzle(date).map_err(|_| VerifyError::Generation)?;
+
+    // The tiles must come from the day's rack.
+    let mut rack_counts = [0u16; 26];
+    for &letter in &puzzle.rack {
+        rack_counts[(letter as u8 - b'A') as usize] += 1;
+    }
+    let mut tiles = Vec::new();
+    for t in &submission.tiles {
+        let [letter] = t.letter.as_bytes() else { return Err(VerifyError::IllegalMove) };
+        if !letter.is_ascii_uppercase() {
+            return Err(VerifyError::IllegalMove);
+        }
+        if !(0..BOARD_SIZE).contains(&t.row) || !(0..BOARD_SIZE).contains(&t.col) {
+            return Err(VerifyError::IllegalMove);
+        }
+        let idx = (letter - b'A') as usize;
+        if rack_counts[idx] == 0 {
+            return Err(VerifyError::IllegalMove);
+        }
+        rack_counts[idx] -= 1;
+        tiles.push(Tile { row: t.row, col: t.col, letter: *letter });
+    }
+
+    let placed: Vec<PlacedWord> = puzzle
+        .placed
+        .iter()
+        .map(|p| PlacedWord { row: p.row, col: p.col, dir: p.dir, word: p.word.clone() })
+        .collect();
+    let board = build_board(&placed);
+    let scored = score_placement(&board, &tiles).ok_or(VerifyError::IllegalMove)?;
+    for word in &scored.words {
+        if !DICT.contains(word.word.as_str()) {
+            return Err(VerifyError::UnknownWord(word.word.clone()));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "score": scored.score,
+        "max_score": puzzle.max_score,
+        "at_max": scored.score >= puzzle.max_score,
+        "bingo": scored.bingo,
+        "words": scored.words.iter().map(|w| w.word.clone()).collect::<Vec<_>>(),
+        "time_ms": elapsed_ms,
+    }))
 }
 
 // ---------------------------------------------------------------- tests

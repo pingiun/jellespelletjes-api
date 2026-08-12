@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod profile;
+pub mod puzzle;
 pub mod results;
 
 use crate::SharedState;

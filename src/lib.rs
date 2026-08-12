@@ -37,6 +37,7 @@ pub fn router(state: SharedState) -> Router {
 
     Router::new()
         .route("/healthz", get(routes::healthz))
+        .route("/puzzle/lettersoep/{date}", get(routes::puzzle::lettersoep_puzzle))
         .route("/auth/magic-link", post(routes::auth::request_magic_link))
         .route("/auth/magic-link/consume", post(routes::auth::consume_magic_link))
         .route("/auth/code/consume", post(routes::auth::consume_code))

@@ -1,5 +1,5 @@
 use crate::auth::Session;
-use crate::games::{self, sudokudo, woordle};
+use crate::games::{self, lettersoep, sudokudo, woordle};
 use crate::SharedState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -49,7 +49,16 @@ pub async fn put_result(
         return Err(err(StatusCode::NOT_FOUND, "unknown game"));
     }
 
-    let payload = match sudoku_mode(&game) {
+    let payload = if game == "lettersoep" {
+        let submission: lettersoep::LettersoepSubmission =
+            serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
+        // Verification may generate the day's puzzle (~1s of CPU).
+        tokio::task::spawn_blocking(move || lettersoep::verify(day, &submission))
+            .await
+            .map_err(internal)?
+            .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.message()))?
+    } else {
+        match sudoku_mode(&game) {
         Some(mode) => {
             let submission: sudokudo::SudokuSubmission =
                 serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
@@ -79,6 +88,7 @@ pub async fn put_result(
                 serde_json::from_value(body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed submission"))?;
             woordle::verify(&game, day, &submission)
                 .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.message()))?
+        }
         }
     };
 

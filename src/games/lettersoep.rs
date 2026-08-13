@@ -83,9 +83,9 @@ impl Lang {
     }
 }
 
-/// Launch day: puzzle #1 appears on this UTC date (placeholder for now).
+/// Launch day: puzzle #1 appears on this UTC date.
 pub fn epoch() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()
+    NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()
 }
 
 // ---------------------------------------------------------------- rng
@@ -1049,7 +1049,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let puzzle = daily_puzzle(date, Lang::Nl).unwrap();
         assert_eq!(puzzle.seed, 103931349);
-        assert_eq!(puzzle.number, 1);
+        assert_eq!(puzzle.number, 46);
         let words: Vec<(&str, i32, i32, &str)> = puzzle
             .placed
             .iter()
@@ -1099,6 +1099,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let puzzle = daily_puzzle(date, Lang::En).unwrap();
         assert_eq!(puzzle.seed, 746757450);
+        assert_eq!(puzzle.number, 46);
         assert_eq!(puzzle.generator_version, "v2");
         let words: Vec<(&str, i32, i32, &str)> = puzzle
             .placed

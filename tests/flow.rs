@@ -211,7 +211,9 @@ async fn full_flow() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, body) = call(&state, "GET", "/profile", Some(&game_token), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["games"]["sudokudo"]["played"], 1);
+    // Imported baseline counts merge into the totals (1 verified + 12 imported).
+    assert_eq!(body["games"]["sudokudo"]["played"], 13);
+    assert_eq!(body["games"]["sudokudo"]["won"], 12);
     assert_eq!(body["games"]["sudokudo"]["current_streak"], 1);
     assert_eq!(body["games"]["sudokudo"]["imported_baseline"]["gamesPlayed"], 12);
 

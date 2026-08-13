@@ -58,10 +58,14 @@ pub async fn profile(
             "sudokudo-expert" => today_sudoku.get("expert").copied().flatten(),
             g => woordle::variant(g).map(woordle::utc_day),
         };
-        let mut entry = stats::game_stats(game, &game_rows, today_day);
-        if let Some((_, baseline)) = imported.iter().find(|(g, _)| g == game) {
-            entry["imported_baseline"] =
-                serde_json::from_str(baseline).unwrap_or(serde_json::Value::Null);
+        let imported_payload: Option<serde_json::Value> = imported
+            .iter()
+            .find(|(g, _)| g == game)
+            .and_then(|(_, baseline)| serde_json::from_str(baseline).ok());
+        let baseline = imported_payload.as_ref().map(stats::baseline_from_import);
+        let mut entry = stats::game_stats(game, &game_rows, today_day, baseline);
+        if let Some(payload) = imported_payload {
+            entry["imported_baseline"] = payload;
         }
         per_game.insert(game.to_string(), entry);
     }

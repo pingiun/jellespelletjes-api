@@ -147,7 +147,7 @@ pub fn puzzle_number(date: NaiveDate) -> i64 {
 
 // ---------------------------------------------------------------- letters
 
-/// Dutch Scrabble letter values.
+/// Dutch letter values (classic distribution).
 fn letter_value_nl(letter: u8) -> u32 {
     match letter {
         b'A' | b'E' | b'I' | b'N' | b'O' => 1,
@@ -161,7 +161,7 @@ fn letter_value_nl(letter: u8) -> u32 {
     }
 }
 
-/// Official English Scrabble letter values.
+/// English letter values (classic distribution).
 fn letter_value_en(letter: u8) -> u32 {
     match letter {
         b'A' | b'E' | b'I' | b'L' | b'N' | b'O' | b'R' | b'S' | b'T' | b'U' => 1,
@@ -175,7 +175,7 @@ fn letter_value_en(letter: u8) -> u32 {
     }
 }
 
-/// Official Scrabble bags (blanks left out), in A..Z order — the order
+/// Classic letter bags (blanks left out), in A..Z order — the order
 /// matters because the bag Vec feeds the shuffle.
 const BAG_NL: [(u8, u8); 26] = [
     (b'A', 6), (b'B', 2), (b'C', 2), (b'D', 5), (b'E', 18), (b'F', 2), (b'G', 3),
@@ -208,7 +208,7 @@ enum Premium {
     Dl,
 }
 
-/// Official Scrabble premium layout, upper-left quadrant, mirrored.
+/// Classic premium layout, upper-left quadrant, mirrored.
 fn premium_at(row: i32, col: i32) -> Option<Premium> {
     use Premium::*;
     const Q: [[Option<Premium>; 8]; 8] = [

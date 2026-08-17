@@ -1032,6 +1032,16 @@ pub fn verify(
         "bingo": scored.bingo,
         "words": scored.words.iter().map(|w| w.word.clone()).collect::<Vec<_>>(),
         "time_ms": elapsed_ms,
+        // The validated placement, so a login on another device can
+        // restore and show the completed game.
+        "tiles": tiles
+            .iter()
+            .map(|t| serde_json::json!({
+                "row": t.row,
+                "col": t.col,
+                "letter": (t.letter as char).to_string(),
+            }))
+            .collect::<Vec<_>>(),
     }))
 }
 

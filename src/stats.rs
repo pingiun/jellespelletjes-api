@@ -57,8 +57,11 @@ pub fn game_stats(
     let mut days: Vec<(i64, bool)> = rows
         .iter()
         .map(|r| {
-            let won = if game.starts_with("sudokudo") {
-                true // only verified wins are stored for sudoku
+            // Sudoku and lettersoep have no lose state: any stored verified
+            // result means the day was played and the streak continues.
+            let dayless_win = game.starts_with("sudokudo") || game.starts_with("letterso");
+            let won = if dayless_win {
+                true
             } else {
                 r.payload.get("won").and_then(|v| v.as_bool()).unwrap_or(false)
             };
@@ -246,6 +249,22 @@ mod tests {
         assert_eq!(b.max_streak, 8);
         let b = baseline_from_import(&json!({"currentStreak": -2}));
         assert_eq!(b.current_streak, 0);
+    }
+
+    #[test]
+    fn lettersoep_days_count_as_won() {
+        // lettersoep results have no "won" field: playing the day keeps
+        // the streak alive.
+        let rows = vec![
+            ResultRow { day: 1, payload: json!({ "score": 18, "words": ["rij"] }) },
+            ResultRow { day: 2, payload: json!({ "score": 24, "words": ["rijk"] }) },
+        ];
+        let s = game_stats("lettersoep", &rows, Some(2), None);
+        assert_eq!(s["current_streak"], json!(2));
+        assert_eq!(s["won"], json!(2));
+        // An old result does not count as a live streak.
+        let s = game_stats("lettersoep", &rows, Some(9), None);
+        assert_eq!(s["current_streak"], json!(0));
     }
 
     #[test]

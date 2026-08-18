@@ -56,6 +56,9 @@ pub async fn profile(
         let today_day = match *game {
             "sudokudo" => today_sudoku.get("normal").copied().flatten(),
             "sudokudo-expert" => today_sudoku.get("expert").copied().flatten(),
+            "lettersoep" | "lettersoup" => {
+                Some(games::lettersoep::puzzle_number(chrono::Utc::now().date_naive()))
+            }
             g => woordle::variant(g).map(woordle::utc_day),
         };
         let imported_payload: Option<serde_json::Value> = imported

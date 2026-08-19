@@ -54,6 +54,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/results", get(routes::results::list_results))
         .route("/import/{game}", post(routes::results::import_stats))
         .route("/profile", get(routes::profile::profile))
+        .route("/goud/waitlist", post(routes::goud::join_waitlist))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

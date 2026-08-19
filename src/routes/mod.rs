@@ -1,5 +1,4 @@
 pub mod auth;
-pub mod goud;
 pub mod profile;
 pub mod puzzle;
 pub mod results;

@@ -462,13 +462,10 @@ fn counts_fit(needed: &[u8; 32], avail: &[u8; 32]) -> bool {
 /// Two indexes keep it fast: precomputed word signatures (mask + counts)
 /// prune candidates, and per-line anchor ranges limit placements to lines
 /// that can actually touch the board.
-pub fn find_all_moves(
-    lang: Lang,
-    fixed: &Board,
-    rack: &[u8],
-    index: &[WordEntry],
-    dict: &HashSet<&str>,
-) -> Vec<Move> {
+/// Run `f` for every geometrically valid placement of a candidate word:
+/// it fits the line, uses only available tiles and touches the existing
+/// board. Whether the formed cross words are real words is NOT checked.
+fn for_each_fit(lang: Lang, fixed: &Board, rack: &[u8], index: &[WordEntry], mut f: impl FnMut(Vec<Tile>, Scored)) {
     let grid = Grid::from_board(fixed);
     let rack_counts = count_letters(rack.iter().copied());
     let board_counts = count_letters(fixed.values().copied());
@@ -519,7 +516,6 @@ pub fn find_all_moves(
         }
     }
 
-    let mut moves: HashMap<String, Move> = HashMap::new();
     for entry in &candidates {
         let word = entry.word;
         let len = entry.len as i32;
@@ -537,29 +533,65 @@ pub fn find_all_moves(
                         continue;
                     };
                     let Some(scored) = score_placement_grid(lang, &grid, &tiles) else { continue };
-                    if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
-                        continue;
-                    }
-                    let mut parts: Vec<String> = tiles
-                        .iter()
-                        .map(|t| format!("{},{},{}", t.row, t.col, t.letter as char))
-                        .collect();
-                    parts.sort();
-                    moves.entry(parts.join(";")).or_insert(Move {
-                        tiles,
-                        words: scored.words,
-                        score: scored.score,
-                        bingo: scored.bingo,
-                    });
+                    f(tiles, scored);
                 }
             }
         }
     }
+}
+
+pub fn find_all_moves(
+    lang: Lang,
+    fixed: &Board,
+    rack: &[u8],
+    index: &[WordEntry],
+    dict: &HashSet<&str>,
+) -> Vec<Move> {
+    let mut moves: HashMap<String, Move> = HashMap::new();
+    for_each_fit(lang, fixed, rack, index, |tiles, scored| {
+        if !scored.words.iter().all(|w| dict.contains(w.word.as_str())) {
+            return;
+        }
+        let mut parts: Vec<String> = tiles
+            .iter()
+            .map(|t| format!("{},{},{}", t.row, t.col, t.letter as char))
+            .collect();
+        parts.sort();
+        moves.entry(parts.join(";")).or_insert(Move {
+            tiles,
+            words: scored.words,
+            score: scored.score,
+            bingo: scored.bingo,
+        });
+    });
     // Deterministic order: score descending, canonical tile key as the
     // tie-break (the view targets moves[0], so ties must not be arbitrary).
     let mut all: Vec<(String, Move)> = moves.into_iter().collect();
     all.sort_by(|a, b| b.1.score.cmp(&a.1.score).then_with(|| a.0.cmp(&b.0)));
     all.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Every real dictionary word among the words formed by ANY geometric
+/// placement, legal move or not. The client checks its live dictionary
+/// feedback against this list, so a real word that only fits where it also
+/// makes a bad cross word (ZAAG making ZN) still counts as "in the
+/// dictionary" and the bad cross word gets the blame.
+pub fn formable_words(
+    lang: Lang,
+    fixed: &Board,
+    rack: &[u8],
+    index: &[WordEntry],
+    dict: &HashSet<&str>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for_each_fit(lang, fixed, rack, index, |_tiles, scored| {
+        for w in scored.words {
+            if dict.contains(w.word.as_str()) {
+                out.insert(w.word);
+            }
+        }
+    });
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -721,10 +753,7 @@ pub fn daily_puzzle(date: NaiveDate, lang: Lang) -> anyhow::Result<DailyPuzzle> 
         if !moves.iter().any(|m| m.bingo) {
             continue;
         }
-        let valid_words: BTreeSet<String> = moves
-            .iter()
-            .flat_map(|m| m.words.iter().map(|w| w.word.clone()))
-            .collect();
+        let valid_words = formable_words(lang, &board, &rack, lang.word_index(), lang.dict());
         return Ok(DailyPuzzle {
             date: date.to_string(),
             number: puzzle_number(date),
@@ -1084,7 +1113,7 @@ mod tests {
         );
         assert_eq!(puzzle.max_score, 87);
         assert_eq!(puzzle.move_count, 644);
-        assert_eq!(puzzle.valid_words.len(), 315);
+        assert_eq!(puzzle.valid_words.len(), 428);
         assert_eq!(&puzzle.valid_words[..3], ["AAN", "AANBEEN", "AANBENE"]);
     }
 
@@ -1135,7 +1164,7 @@ mod tests {
         );
         assert_eq!(puzzle.max_score, 69);
         assert_eq!(puzzle.move_count, 355);
-        assert_eq!(puzzle.valid_words.len(), 213);
+        assert_eq!(puzzle.valid_words.len(), 267);
         assert_eq!(&puzzle.valid_words[..3], ["AG", "AGIN", "AGING"]);
     }
 
